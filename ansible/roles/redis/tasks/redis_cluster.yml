@@ -1,0 +1,170 @@
+---
+- name: install the Development Tools
+  yum:
+    name: "@Development Tools"
+    state: present
+
+- name: create group appgrp
+  group:
+    name: appgrp
+    gid: 1000
+    state: present
+
+- name: create user rtpapp
+  user:
+    name: rtpapp
+    uid: 1000
+    groups: appgrp
+    password: "{{ 'Yunjikeji#123' | password_hash('sha512') }}"
+    shell: /bin/bash
+    home: /userhome/rtpapp
+    expires: -1
+
+- name: mkdir_redis_dir
+  file:
+    path: "{{ REDIS_DIR }}"
+    state: directory
+    recurse: yes
+    group: appgrp
+    owner: rtpapp
+    mode: 0755
+  loop:
+    - "{{ REDIS_DIR }}"
+    - /approot/rtp-rcc/conf
+    - /approot/rtp-rcc/data
+    - /approot/rtp-rcc/pidfile
+    - /applog/rtp-rcc/redis/logs
+    - /appoper/pgmbak/rtp-rcc
+    - /applog/nmon/logs
+
+- name: init ENV sysctl
+  lineinfile:
+    path: /etc/sysctl.conf
+    line: "{{ item }}"
+  loop:
+    - vm.overcommit_memory=1
+    - vm.swappiness=1
+    - net.core.somaxconn=2048
+    - net.ipv4.tcp_max_syn_backlog=2048
+
+- name: init ENV rc.local
+  lineinfile:
+    path: /etc/rc.local
+    line: "{{ item }}"
+  loop:
+    - echo never > /sys/kernel/mm/transparent_hugepage/enabled
+    - echo never > /sys/kernel/mm/transparent_hugepage/defrag
+
+- name: init ENV 
+  shell: "{{ item }}"
+  loop:
+    - echo 1 > /proc/sys/vm/swappiness
+    - echo never > /sys/kernel/mm/transparent_hugepage/enabled
+    - echo never > /sys/kernel/mm/transparent_hugepage/defrag
+    - echo 2048 > /proc/sys/net/core/somaxconn
+    - echo 2048 > /proc/sys/net/ipv4/tcp_max_syn_backlog
+    - sysctl -p
+
+- name: chmod rc.local
+  file:
+    path: /etc/rc.d/rc.local
+    mode: a+x 
+
+- name: download redis package
+  get_url:
+    url: "{{ SoftwareIp_path }}/redis-{{ redis_version }}.tar.gz"
+    dest: "{{ REDIS_DIR }}/"
+    mode: 0644
+    force: yes
+    validate_certs: no
+
+- name: tar redis package
+  unarchive: 
+    src: "{{ REDIS_DIR }}/redis-{{ redis_version }}.tar.gz"
+    dest: "{{ REDIS_DIR }}/"
+    remote_src: yes
+
+- name: Run 'install' target
+  make:
+    chdir: "{{ REDIS_DIR }}/redis-{{ redis_version }}"
+    target: install
+    file: "{{ REDIS_DIR }}/redis-{{ redis_version }}/Makefile"
+    params:
+      PREFIX: "redis"
+
+- name: Remove redis bin file
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/bin/redis-server
+    - /usr/bin/redis-sentinel
+    - /usr/bin/redis-cli
+    - /usr/bin/redis-benchmark
+    - /usr/bin/redis-check-aof
+    - /usr/bin/redis-check-rdb
+
+- name: links redis bin file
+  file:
+    src: '{{ item.src }}'
+    dest: '{{ item.dest }}'
+    state: link
+  with_items:
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-server", dest: /usr/bin/redis-server }
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-sentinel", dest: /usr/bin/redis-sentinel }
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-cli", dest: /usr/bin/redis-cli }
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-benchmark", dest: /usr/bin/redis-benchmark }
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-check-aof", dest: /usr/bin/redis-check-aof }
+    - { src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/src/redis/bin/redis-check-rdb", dest: /usr/bin/redis-check-rdb }
+
+- name: chown redis dir
+  file:
+    path: "{{ REDIS_DIR }}"
+    state: directory
+    recurse: yes
+    group: appgrp
+    owner: rtpapp
+    mode: 0755
+
+- name: mv redis version dir
+  copy:
+    src: "{{ REDIS_DIR }}/redis-{{ redis_version }}/"
+    dest: "{{ REDIS_DIR }}/redis/"
+    owner: rtpapp
+    group: appgrp
+    mode: 0755
+    remote_src: yes
+
+- name:
+  lineinfile:
+    path: "{{ REDIS_DIR }}/redis/redis.conf"
+    regexp: "{{ item.src }}"
+    line: "{{ item.dest }}"
+  loop:
+    - { src: '^port 6379', dest: "port {{ servicePort }}" }
+    - { src: "^bind 127.0.0.1", dest: "bind 0.0.0.0" }
+    - { src: "^pidfile /var/run/redis_6379.pid", dest: "pidfile {{ REDIS_DIR }}/redis/redis.pid" }
+    - { src: "^appendonly no", dest: "appendonly yes" }
+    - { src: "^protected-mode yes", dest: "protected-mode no" }
+    - { src: "^daemonize no", dest: "daemonize yes" }
+    - { src: '^logfile ""', dest: 'logfile "{{ REDIS_DIR }}/redis/redis.log"' }
+    - { src: '^logfile ""', dest: 'logfile "{{ REDIS_DIR }}/redis/redis.log"' }
+
+- name:
+  lineinfile:
+    path: "{{ REDIS_DIR }}/redis/redis.conf"
+    line: 'slaveof {{groups["redis"][0]}} "{{ servicePort }}"'
+  when: ansible_play_hosts.index(inventory_hostname) != 0
+
+- name: chown redis dir
+  file:
+    path: "{{ REDIS_DIR }}"
+    state: directory
+    recurse: yes
+    group: appgrp
+    owner: rtpapp
+    mode: 0755
+
+- name: start redis service
+  become_user: rtpapp
+  shell: "/usr/bin/redis-server {{ REDIS_DIR }}/redis/redis.conf"

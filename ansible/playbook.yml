@@ -1,0 +1,14 @@
+---
+- name: install Redis
+  hosts: redis
+  vars:
+    - installRedis: "{{ install_Redis }}"
+    - cluster: "{{ cluster_Model }}"
+    - sSoftwareIp: "{{ Software_Ip }}"
+    - sSoftwarePath: "{{ Software_redisPath }}"
+    - SoftwareIp_path: http://{{ sSoftwareIp }}/{{ sSoftwarePath }}
+    - redis_version: "{{ Version }}"
+    - servicePort: "{{ PORT }}"
+    - REDIS_DIR: "{{ REDISDIR }}"
+  roles:
+    - { role: redis, when: installRedis == "true"  }
